@@ -1,3 +1,6 @@
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
+import os
 import json
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
@@ -27,4 +30,22 @@ async def main():
     await app.run_polling()
 
 import asyncio
-asyncio.run(main())     
+asyncio.run(main())    
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
+
+# ---- Fake Web Server for Render ----
+class PingHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"OK")
+
+def run_fake_webserver():
+    port = int(os.environ.get("PORT", 10000))
+    server = HTTPServer(("0.0.0.0", port), PingHandler)
+    server.serve_forever()
+
+# Запуск веб-сервера в отдельном потоке
+threading.Thread(target=run_fake_webserver, daemon=True).start()
+print("Fake webserver started!")
