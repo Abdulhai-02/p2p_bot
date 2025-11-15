@@ -266,6 +266,11 @@ def run_fake_webserver():
 # ===========================================================
 
 def main():
+    try:
+        print("Текущий IP:", requests.get("https://api.ipify.org").text)
+    except:
+        print("Не смог получить IP")
+    
     updater = Updater(token=CFG["TELEGRAM_TOKEN"], use_context=True)
     dp = updater.dispatcher
 
