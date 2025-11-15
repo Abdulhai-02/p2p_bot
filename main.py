@@ -5,6 +5,7 @@ import hmac
 import hashlib
 import base64
 import threading
+import subprocess
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import urlencode
 
@@ -12,7 +13,33 @@ import requests
 from telegram import Update
 from telegram.ext import Updater, CommandHandler, CallbackContext
 
-# ---------- ЗАГРУЗКА КОНФИГА ----------
+
+# ===========================================================
+#                 WIREGUARD VPN ЗАПУСК
+# ===========================================================
+
+def start_vpn():
+    """
+    Запуск WireGuard, если включено через переменную WG_ENABLED=1
+    Конфиг лежит в WG_CONFIG полностью (текст)
+    """
+    if os.environ.get("WG_ENABLED") == "1":
+        print("WG_ENABLED=1 → Запускаю WireGuard...")
+        try:
+            with open("wg.conf", "w") as f:
+                f.write(os.environ["WG_CONFIG"])
+
+            subprocess.Popen(["wg-quick", "up", "wg.conf"])
+            print("WireGuard VPN успешно запущен!")
+        except Exception as e:
+            print("Ошибка запуска WireGuard:", e)
+    else:
+        print("WireGuard отключён (WG_ENABLED != 1)")
+
+
+# ===========================================================
+#                     ЗАГРУЗКА КОНФИГА
+# ===========================================================
 
 def load_config():
     with open("config.json", "r", encoding="utf-8") as f:
@@ -22,22 +49,13 @@ CFG = load_config()
 
 
 def allowed_user(update: Update) -> bool:
-    """Проверяем, что пишет только разрешённый пользователь."""
     user_id = update.effective_user.id if update.effective_user else None
-    allowed = CFG.get("ALLOWED_USERS", [])
-    return user_id in allowed
+    return user_id in CFG.get("ALLOWED_USERS", [])
 
 
-# ---------- ПРОКСИ ДЛЯ ОБХОДА USA BLOCK ----------
-
-# Франция (стоит и работает стабильно)
-proxies = {
-    "http": "http://154.16.180.182:3128",
-    "https": "http://154.16.180.182:3128",
-}
-
-
-# ---------- KuCoin SPOT API КЛИЕНТ ----------
+# ===========================================================
+#                  KuCoin SPOT КЛИЕНТ
+# ===========================================================
 
 KUCOIN_API_KEY = os.environ.get("KUCOIN_API_KEY")
 KUCOIN_API_SECRET = os.environ.get("KUCOIN_API_SECRET")
@@ -46,9 +64,6 @@ KUCOIN_BASE_URL = "https://api.kucoin.com"
 
 
 def kucoin_sign(method: str, path: str, params: dict | None = None, body: dict | None = None):
-    """
-    Подпись запроса KuCoin Spot.
-    """
     if params:
         query_str = "?" + urlencode(params)
     else:
@@ -62,16 +77,16 @@ def kucoin_sign(method: str, path: str, params: dict | None = None, body: dict |
 
     signature = base64.b64encode(
         hmac.new(
-            KUCOIN_API_SECRET.encode(),
-            str_to_sign.encode(),
+            KUCOIN_API_SECRET.encode("utf-8"),
+            str_to_sign.encode("utf-8"),
             hashlib.sha256,
         ).digest()
     ).decode()
 
     passphrase = base64.b64encode(
         hmac.new(
-            KUCOIN_API_SECRET.encode(),
-            KUCOIN_API_PASSPHRASE.encode(),
+            KUCOIN_API_SECRET.encode("utf-8"),
+            KUCOIN_API_PASSPHRASE.encode("utf-8"),
             hashlib.sha256,
         ).digest()
     ).decode()
@@ -87,10 +102,7 @@ def kucoin_sign(method: str, path: str, params: dict | None = None, body: dict |
     return headers, url_path
 
 
-def kucoin_get_fills(symbol: str | None = None, limit: int = 50):
-    """
-    Получаем историю сделок SPOT.
-    """
+def kucoin_get_fills(symbol=None, limit=50):
     if not (KUCOIN_API_KEY and KUCOIN_API_SECRET and KUCOIN_API_PASSPHRASE):
         raise RuntimeError("KuCoin API ключи не заданы в переменных окружения.")
 
@@ -102,13 +114,10 @@ def kucoin_get_fills(symbol: str | None = None, limit: int = 50):
     headers, url_path = kucoin_sign("GET", path, params=params)
     url = KUCOIN_BASE_URL + url_path
 
-    # ВАЖНО: отправляем через европейский прокси
-    resp = requests.get(url, headers=headers, timeout=15, proxies=proxies)
+    resp = requests.get(url, headers=headers, timeout=15)
 
     if resp.status_code != 200:
-        raise RuntimeError(
-            f"KuCoin API error: HTTP {resp.status_code} {resp.text}"
-        )
+        raise RuntimeError(f"KuCoin API error: HTTP {resp.status_code} {resp.text}")
 
     data = resp.json()
     if data.get("code") != "200000":
@@ -117,12 +126,13 @@ def kucoin_get_fills(symbol: str | None = None, limit: int = 50):
     return data.get("data", {}).get("items", [])
 
 
-# ---------- ХЭНДЛЕРЫ КОМАНД ----------
+# ===========================================================
+#                  TELEGRAM КОМАНДЫ
+# ===========================================================
 
 def cmd_start(update: Update, context: CallbackContext):
     if not allowed_user(update):
         return
-
     update.message.reply_text(
         "Бот для статистики KuCoin SPOT работает.\n"
         "Команды:\n"
@@ -132,14 +142,18 @@ def cmd_start(update: Update, context: CallbackContext):
     )
 
 
-def format_trade(tr: dict) -> str:
+def format_trade(tr):
     symbol = tr.get("symbol")
     side = tr.get("side")
     size = tr.get("size")
     price = tr.get("price")
     funds = tr.get("funds")
-    ts = tr.get("createdAt")
-    t_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(ts / 1000)) if ts else "?"
+    time_ms = tr.get("createdAt")
+
+    t_str = "?"
+    if time_ms:
+        t_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(time_ms / 1000))
+
     return f"{t_str} | {symbol} | {side.upper()} | size={size} | price={price} | amount={funds}"
 
 
@@ -154,39 +168,41 @@ def cmd_orders(update: Update, context: CallbackContext):
         return
 
     if not fills:
-        update.message.reply_text("Сделок не найдено.")
+        update.message.reply_text("Сделок нет.")
         return
 
-    text = "Последние 10 сделок:\n" + "\n".join(format_trade(t) for t in fills)
-    update.message.reply_text(text[:4000])
+    lines = ["Последние 10 сделок:"]
+    for tr in fills:
+        lines.append(format_trade(tr))
+
+    update.message.reply_text("\n".join(lines))
 
 
-def calc_simple_stats(fills: list):
+def calc_stats(fills):
     if not fills:
         return "Сделок нет."
 
-    total = len(fills)
-    buy = sum(1 for f in fills if f.get("side") == "buy")
-    sell = sum(1 for f in fills if f.get("side") == "sell")
+    buy = sum(1 for x in fills if x["side"] == "buy")
+    sell = sum(1 for x in fills if x["side"] == "sell")
 
-    symbols = {}
+    volume = {}
     for tr in fills:
         sym = tr["symbol"]
-        funds = float(tr.get("funds", 0))
-        symbols[sym] = symbols.get(sym, 0) + abs(funds)
+        vol = abs(float(tr.get("funds", 0)))
+        volume[sym] = volume.get(sym, 0) + vol
 
-    lines = [
-        f"Всего сделок: {total}",
+    text = [
+        f"Всего сделок: {len(fills)}",
         f"BUY: {buy}",
         f"SELL: {sell}",
         "",
-        "Объёмы по парам:",
+        "Объём по парам:"
     ]
 
-    for sym, vol in sorted(symbols.items(), key=lambda x: x[1], reverse=True)[:10]:
-        lines.append(f"{sym}: {vol:.2f}")
+    for sym, vol in sorted(volume.items(), key=lambda x: x[1], reverse=True):
+        text.append(f"{sym}: {vol:.2f}")
 
-    return "\n".join(lines)
+    return "\n".join(text)
 
 
 def cmd_stats(update: Update, context: CallbackContext):
@@ -197,9 +213,11 @@ def cmd_stats(update: Update, context: CallbackContext):
 
     try:
         fills = kucoin_get_fills(limit=200)
-        update.message.reply_text(calc_simple_stats(fills))
     except Exception as e:
         update.message.reply_text(f"Ошибка при запросе статистики KuCoin:\n{e}")
+        return
+
+    update.message.reply_text(calc_stats(fills))
 
 
 def cmd_pair(update: Update, context: CallbackContext):
@@ -211,16 +229,25 @@ def cmd_pair(update: Update, context: CallbackContext):
         return
 
     symbol = context.args[0].upper()
-    update.message.reply_text(f"Запрашиваю сделки по {symbol}...")
+
+    update.message.reply_text(f"Запрашиваю сделки {symbol}...")
 
     try:
         fills = kucoin_get_fills(symbol=symbol, limit=200)
-        update.message.reply_text(f"Статистика по {symbol}:\n\n{calc_simple_stats(fills)}")
     except Exception as e:
-        update.message.reply_text(f"Ошибка при запросе KuCoin:\n{e}")
+        update.message.reply_text(f"Ошибка KuCoin:\n{e}")
+        return
+
+    if not fills:
+        update.message.reply_text("Сделок нет.")
+        return
+
+    update.message.reply_text(f"Статистика по {symbol}:\n\n{calc_stats(fills)}")
 
 
-# ---------- FAKE WEB SERVER ----------
+# ===========================================================
+#              ФЕЙКОВЫЙ WEB SERVER ДЛЯ Railway
+# ===========================================================
 
 class PingHandler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -228,23 +255,18 @@ class PingHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(b"OK")
 
-    def do_HEAD(self):
-        self.send_response(200)
-        self.end_headers()
-
 
 def run_fake_webserver():
     port = int(os.environ.get("PORT", 10000))
-    server = HTTPServer(("0.0.0.0", port), PingHandler)
-    server.serve_forever()
+    HTTPServer(("0.0.0.0", port), PingHandler).serve_forever()
 
 
-# ---------- ЗАПУСК БОТА ----------
+# ===========================================================
+#                       MAIN BOT
+# ===========================================================
 
 def main():
-    token = CFG["TELEGRAM_TOKEN"]
-
-    updater = Updater(token=token, use_context=True)
+    updater = Updater(token=CFG["TELEGRAM_TOKEN"], use_context=True)
     dp = updater.dispatcher
 
     dp.add_handler(CommandHandler("start", cmd_start))
@@ -257,5 +279,6 @@ def main():
 
 
 if __name__ == "__main__":
+    start_vpn()   # ← запуск VPN
     threading.Thread(target=run_fake_webserver, daemon=True).start()
     main()
