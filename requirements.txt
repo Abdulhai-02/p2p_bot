@@ -1,5 +1,6 @@
-python-telegram-bot==13.14
-requests
-google-api-python-client
-google-auth-httplib2
-google-auth-oauthlib
+python-telegram-bot==20.7
+google-api-python-client==2.148.0
+google-auth-oauthlib==1.2.0
+google-auth==2.34.0
+aiohttp==3.9.5
+sqlite3-binary
